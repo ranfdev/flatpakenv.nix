@@ -6,9 +6,10 @@ in
 rec {
   buildPhase = {
     meson = { configOpts ? [ ] }: ''
-      meson ${pkgs.lib.foldr (a: b: a + " " + b) "" configOpts} --prefix=/app build
-      ninja -C build
-      ninja -C build install
+      echo "Mutable build dir at $FLATPAKNIX_BUILD_DIR/$FLATPAKNIX_MOD_NAME"
+      meson ${pkgs.lib.foldr (a: b: a + " " + b) "" configOpts} --prefix=/app $FLATPAKNIX_BUILD_DIR/$FLATPAKNIX_MOD_NAME
+      ninja -C $FLATPAKNIX_BUILD_DIR/$FLATPAKNIX_MOD_NAME
+      ninja -C $FLATPAKNIX_BUILD_DIR/$FLATPAKNIX_MOD_NAME install
     '';
   };
   buildModule =
@@ -28,8 +29,8 @@ rec {
         ln -s $src $out/src
         touch $out/buildPhase.sh
         {
-          echo "${preBuildPhase}"
-          echo "${buildPhase}"
+          echo '${preBuildPhase}'
+          echo '${buildPhase}'
         } > $out/buildPhase.sh
       '';
     };
@@ -43,6 +44,7 @@ rec {
     , modules ? [ ]
     }:
     let
+      cacheBuildDir = ''~/.cache/flatpakenv.nix/${appId}'';
       modulesDrvs = map
         (desc:
           if pkgs.lib.isDerivation desc
@@ -50,24 +52,31 @@ rec {
           else (buildModule desc))
         modules;
       modulesBuildPhase = pkgs.writeShellScript ''modulesBuildPhase'' ''
+        FLATPAKNIX_BUILD_DIR=${cacheBuildDir}
         ${concat (map (mod: ''
-          bname=$(basename "${mod}")
-          cd /app/build-deps/$bname/src
-          bash /app/build-deps/$bname/buildPhase.sh
+          FLATPAKNIX_MOD_NAME=$(basename "${mod}")
+          prevpwd=`pwd`
+          mutsrcdir=`mktemp -d`
+          cp -r result/build/files/build-deps/$FLATPAKNIX_MOD_NAME/src/. $mutsrcdir
+          chmod -R +rwx $mutsrcdir
+
+          pushd $mutsrcdir/
+          source /$prevpwd/result/build/files/build-deps/$FLATPAKNIX_MOD_NAME/buildPhase.sh
+          popd
         '') modulesDrvs)}
       '';
       flatpakFrameworkBuild = pkgs.writeShellScript ''flatpak-build'' ''
+        FLATPAKNIX_BUILD_DIR=${cacheBuildDir}
         sdkref="${sdk}/${arch}/${runtimeVersion}"
         runtimeref="${runtime}/${arch}/${runtimeVersion}"
         flatpak install $sdkref $runtimeref ${builtins.concatStringsSep " " sdkExtensions}
 
-        flatpak build-init ${builtins.concatStringsSep " " (map (ext: "--sdk-extension=${ext}") sdkExtensions)} ./build ${appId} $sdkref $runtimeref
-        cp -r result/build/files/. ./build/files/
-        chmod -R +rwx result/build/files/
-        flatpak --share=network build ./build bash ./build/files/modulesBuildPhase.sh
-        rm -rf ./build/files/build-deps/
-        flatpak build-finish ./build
-        flatpak build-export outrepo ./build
+        mkdir -p $FLATPAKNIX_BUILD_DIR/flatpak
+
+        flatpak build-init ${builtins.concatStringsSep " " (map (ext: "--sdk-extension=${ext}") sdkExtensions)} $FLATPAKNIX_BUILD_DIR/flatpak ${appId} $sdkref $runtimeref
+        flatpak --share=network build $FLATPAKNIX_BUILD_DIR/flatpak bash result/build/files/modulesBuildPhase.sh
+        flatpak build-finish $FLATPAKNIX_BUILD_DIR/flatpak
+        flatpak build-export outrepo $FLATPAKNIX_BUILD_DIR/flatpak
         flatpak build-bundle outrepo ${appId}.flatpak ${appId}
       '';
     in
